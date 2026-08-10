@@ -1618,7 +1618,7 @@ func validateBug(bug *jira.Issue, dependents []dependent, options JiraBranchOpti
 			} else if depBug.multipleVersions {
 				valid = false
 				fails = append(fails, fmt.Sprintf("expected dependent "+issueLink+" to target a version in %s, but it has multiple target versions", depBug.key, jiraEndpoint, depBug.key, strings.Join(*options.DependentBugTargetVersions, ", ")))
-			} else if sets.NewString(*options.DependentBugTargetVersions...).Has(*depBug.targetVersion) {
+			} else if dependentTargetVersionMatch(*depBug.targetVersion, *options.DependentBugTargetVersions, bug) {
 				passes = append(passes, fmt.Sprintf("dependent "+issueLink+" targets the %q version, which is one of the valid target versions: %s", depBug.key, jiraEndpoint, depBug.key, *depBug.targetVersion, strings.Join(*options.DependentBugTargetVersions, ", ")))
 			} else {
 				valid = false
@@ -1662,6 +1662,47 @@ func validateBug(bug *jira.Issue, dependents []dependent, options JiraBranchOpti
 	return valid, passes, fails
 }
 
+// isExactVersionMatchProject returns true if the issue belongs to a project
+// (such as DFBUGS) that requires exact version matching instead of truncated
+// major.minor prefix matching.
+func isExactVersionMatchProject(issue *jira.Issue) bool {
+	if issue.Fields == nil {
+		return false
+	}
+	return issue.Fields.Project.Key == "DFBUGS"
+}
+
+// truncateVersionToMajorMinor truncates a version string like "4.22.0" to "4.22".
+// It strips the "openshift-" prefix if present (e.g. "openshift-4.22.z" becomes "4.22").
+// If the version has fewer than 2 dot-separated segments, it is returned as-is
+// (with the prefix still stripped).
+func truncateVersionToMajorMinor(version string) string {
+	version = strings.TrimPrefix(version, "openshift-")
+	pieces := strings.Split(version, ".")
+	if len(pieces) >= 2 {
+		return fmt.Sprintf("%s.%s", pieces[0], pieces[1])
+	}
+	return version
+}
+
+// dependentTargetVersionMatch checks whether the dependent bug's target version
+// matches any of the configured valid target versions. For projects that require
+// exact version matching (e.g. DFBUGS), an exact match is required. For all other
+// projects, versions are truncated to major.minor before comparison so that e.g.
+// "4.22.z" matches a configured "4.22.0" (both truncate to "4.22").
+func dependentTargetVersionMatch(actualVersion string, configuredVersions []string, parentBug *jira.Issue) bool {
+	if isExactVersionMatchProject(parentBug) {
+		return sets.NewString(configuredVersions...).Has(actualVersion)
+	}
+	truncatedActual := truncateVersionToMajorMinor(actualVersion)
+	for _, configured := range configuredVersions {
+		if truncateVersionToMajorMinor(configured) == truncatedActual {
+			return true
+		}
+	}
+	return false
+}
+
 func validateTargetVersion(issue *jira.Issue, requiredTargetVersion string) error {
 	issueType := ""
 	if issue.Fields != nil {
@@ -1679,19 +1720,17 @@ func validateTargetVersion(issue *jira.Issue, requiredTargetVersion string) erro
 	if len(targetVersion) > 1 {
 		return fmt.Errorf("expected the %s to target only the %q version, but multiple target versions were set", issueType, requiredTargetVersion)
 	}
-	//prefixedRequiredTargetVersion := fmt.Sprintf("openshift-%s", requiredTargetVersion)
-	//if requiredTargetVersion != targetVersion[0].Name && prefixedRequiredTargetVersion != targetVersion[0].Name {
-	//	return fmt.Errorf("expected the %s to target either version %q or %q, but it targets %q instead", issueType, requiredTargetVersion, prefixedRequiredTargetVersion, targetVersion[0].Name)
-	//}
-	// TODO: Remove this truncated version check...
-	truncatedRequiredTargetVersion := requiredTargetVersion
-	pieces := strings.Split(requiredTargetVersion, ".")
-	if issue.Fields.Project.Key != "DFBUGS" && len(pieces) >= 2 {
-		truncatedRequiredTargetVersion = fmt.Sprintf("%s.%s", pieces[0], pieces[1])
+	// For projects that require exact version matching (e.g. DFBUGS), use
+	// exact equality rather than prefix matching to avoid accepting versions
+	// like "4.22.0.1" when the required version is "4.22.0".
+	if isExactVersionMatchProject(issue) {
+		if targetVersion[0].Name == requiredTargetVersion {
+			return nil
+		}
+		return fmt.Errorf("expected the %s to target the %q version, but it targets %q instead", issueType, requiredTargetVersion, targetVersion[0].Name)
 	}
-	truncatedPrefixedRequiredTargetVersion := fmt.Sprintf("openshift-%s", truncatedRequiredTargetVersion)
-	if !strings.HasPrefix(targetVersion[0].Name, truncatedRequiredTargetVersion) && !strings.HasPrefix(targetVersion[0].Name, truncatedPrefixedRequiredTargetVersion) {
-		return fmt.Errorf("expected the %s to target either version %q or %q, but it targets %q instead", issueType, fmt.Sprintf("%s.*", truncatedRequiredTargetVersion), fmt.Sprintf("%s.*", truncatedPrefixedRequiredTargetVersion), targetVersion[0].Name)
+	if truncateVersionToMajorMinor(requiredTargetVersion) != truncateVersionToMajorMinor(targetVersion[0].Name) {
+		return fmt.Errorf("expected the %s to target either version \"%s.*\" or \"openshift-%s.*\", but it targets %q instead", issueType, requiredTargetVersion, requiredTargetVersion, targetVersion[0].Name)
 	}
 	return nil
 }
