@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -7673,7 +7674,7 @@ func TestValidateBug(t *testing.T) {
 			validations: []string{`bug is open, matching expected state (open)`,
 				"bug is in the state MODIFIED, which is one of the valid states (MODIFIED)",
 			},
-			why:   []string{"expected the bug to target either version \"odf-v1.1.1.*\" or \"openshift-odf-v1.1.1.*\", but it targets \"odf-v1.1.z\" instead"},
+			why:   []string{"expected the bug to target the \"odf-v1.1.1\" version, but it targets \"odf-v1.1.z\" instead"},
 			valid: false,
 		},
 		{
@@ -7851,6 +7852,72 @@ func TestValidateBug(t *testing.T) {
 			why: []string{
 				"dependent bug OCPBUGSM-38676 is not in the required `OCPBUGS` project",
 			},
+		},
+		{
+			name:        "dependent bug with z-stream version matches configured GA version via prefix matching",
+			issue:       &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			dependents:  []dependent{{key: "OCPBUGS-124", bugState: JiraBugState{Status: "MODIFIED"}, targetVersion: strPtr("4.22.z")}},
+			options:     JiraBranchOptions{DependentBugTargetVersions: &[]string{"4.22.0"}},
+			valid:       true,
+			validations: []string{`dependent [Jira Issue OCPBUGS-124](https://my-jira.com/browse/OCPBUGS-124) targets the "4.22.z" version, which is one of the valid target versions: 4.22.0`, "bug has dependents"},
+		},
+		{
+			name:        "dependent bug with GA version matches configured z-stream version via prefix matching",
+			issue:       &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			dependents:  []dependent{{key: "OCPBUGS-124", bugState: JiraBugState{Status: "MODIFIED"}, targetVersion: strPtr("4.22.0")}},
+			options:     JiraBranchOptions{DependentBugTargetVersions: &[]string{"4.22.z"}},
+			valid:       true,
+			validations: []string{`dependent [Jira Issue OCPBUGS-124](https://my-jira.com/browse/OCPBUGS-124) targets the "4.22.0" version, which is one of the valid target versions: 4.22.z`, "bug has dependents"},
+		},
+		{
+			name:        "dependent bug with mismatched minor version fails prefix matching",
+			issue:       &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			dependents:  []dependent{{key: "OCPBUGS-124", bugState: JiraBugState{Status: "MODIFIED"}, targetVersion: strPtr("4.23.0")}},
+			options:     JiraBranchOptions{DependentBugTargetVersions: &[]string{"4.22.0"}},
+			valid:       false,
+			validations: []string{"bug has dependents"},
+			why:         []string{`expected dependent [Jira Issue OCPBUGS-124](https://my-jira.com/browse/OCPBUGS-124) to target a version in 4.22.0, but it targets "4.23.0" instead`},
+		},
+		{
+			name:        "dependent bug exact match still works with prefix matching",
+			issue:       &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			dependents:  []dependent{{key: "OCPBUGS-124", bugState: JiraBugState{Status: "MODIFIED"}, targetVersion: strPtr("4.22.0")}},
+			options:     JiraBranchOptions{DependentBugTargetVersions: &[]string{"4.22.0"}},
+			valid:       true,
+			validations: []string{`dependent [Jira Issue OCPBUGS-124](https://my-jira.com/browse/OCPBUGS-124) targets the "4.22.0" version, which is one of the valid target versions: 4.22.0`, "bug has dependents"},
+		},
+		{
+			name:        "DFBUGS dependent bug uses exact matching, z-stream does not match GA",
+			issue:       &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "DFBUGS"}}},
+			dependents:  []dependent{{key: "DFBUGS-124", bugState: JiraBugState{Status: "MODIFIED"}, targetVersion: strPtr("odf-v1.1.z")}},
+			options:     JiraBranchOptions{DependentBugTargetVersions: &[]string{"odf-v1.1.1"}},
+			valid:       false,
+			validations: []string{"bug has dependents"},
+			why:         []string{`expected dependent [Jira Issue DFBUGS-124](https://my-jira.com/browse/DFBUGS-124) to target a version in odf-v1.1.1, but it targets "odf-v1.1.z" instead`},
+		},
+		{
+			name:        "DFBUGS dependent bug exact match works",
+			issue:       &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "DFBUGS"}}},
+			dependents:  []dependent{{key: "DFBUGS-124", bugState: JiraBugState{Status: "MODIFIED"}, targetVersion: strPtr("odf-v1.1.1")}},
+			options:     JiraBranchOptions{DependentBugTargetVersions: &[]string{"odf-v1.1.1"}},
+			valid:       true,
+			validations: []string{`dependent [Jira Issue DFBUGS-124](https://my-jira.com/browse/DFBUGS-124) targets the "odf-v1.1.1" version, which is one of the valid target versions: odf-v1.1.1`, "bug has dependents"},
+		},
+		{
+			name:        "dependent bug matches one of multiple configured versions via prefix matching",
+			issue:       &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			dependents:  []dependent{{key: "OCPBUGS-124", bugState: JiraBugState{Status: "MODIFIED"}, targetVersion: strPtr("4.21.z")}},
+			options:     JiraBranchOptions{DependentBugTargetVersions: &[]string{"4.22.0", "4.21.0"}},
+			valid:       true,
+			validations: []string{`dependent [Jira Issue OCPBUGS-124](https://my-jira.com/browse/OCPBUGS-124) targets the "4.21.z" version, which is one of the valid target versions: 4.22.0, 4.21.0`, "bug has dependents"},
+		},
+		{
+			name:        "dependent bug with openshift-prefixed version matches configured version via prefix matching",
+			issue:       &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			dependents:  []dependent{{key: "OCPBUGS-124", bugState: JiraBugState{Status: "MODIFIED"}, targetVersion: strPtr("openshift-4.22.z")}},
+			options:     JiraBranchOptions{DependentBugTargetVersions: &[]string{"4.22.0"}},
+			valid:       true,
+			validations: []string{`dependent [Jira Issue OCPBUGS-124](https://my-jira.com/browse/OCPBUGS-124) targets the "openshift-4.22.z" version, which is one of the valid target versions: 4.22.0`, "bug has dependents"},
 		},
 	}
 
@@ -8354,4 +8421,224 @@ func TestSkipDependentBugOptions(t *testing.T) {
 	if opts.DependentBugTargetVersions == nil {
 		t.Errorf("skipDependentBugOptions() must not mutate the original DependentBugTargetVersions")
 	}
+}
+
+func TestTruncateVersionToMajorMinor(t *testing.T) {
+	var testCases = []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "normal three-segment version",
+			input:    "4.22.0",
+			expected: "4.22",
+		},
+		{
+			name:     "z-stream version",
+			input:    "4.22.z",
+			expected: "4.22",
+		},
+		{
+			name:     "openshift-prefixed version",
+			input:    "openshift-4.22.z",
+			expected: "4.22",
+		},
+		{
+			name:     "openshift-prefixed GA version",
+			input:    "openshift-4.22.0",
+			expected: "4.22",
+		},
+		{
+			name:     "two-segment version",
+			input:    "4.22",
+			expected: "4.22",
+		},
+		{
+			name:     "single segment version",
+			input:    "4",
+			expected: "4",
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "openshift-prefixed two-segment version",
+			input:    "openshift-4.22",
+			expected: "4.22",
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := truncateVersionToMajorMinor(tc.input)
+			if result != tc.expected {
+				t.Errorf("truncateVersionToMajorMinor(%q) = %q, want %q", tc.input, result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestDependentTargetVersionMatch(t *testing.T) {
+	var testCases = []struct {
+		name               string
+		actualVersion      string
+		configuredVersions []string
+		parentBug          *jira.Issue
+		expected           bool
+	}{
+		{
+			name:               "exact match for OCPBUGS project",
+			actualVersion:      "4.22.0",
+			configuredVersions: []string{"4.22.0"},
+			parentBug:          &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			expected:           true,
+		},
+		{
+			name:               "prefix match z-stream against GA for OCPBUGS project",
+			actualVersion:      "4.22.z",
+			configuredVersions: []string{"4.22.0"},
+			parentBug:          &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			expected:           true,
+		},
+		{
+			name:               "no match with different minor version",
+			actualVersion:      "4.23.0",
+			configuredVersions: []string{"4.22.0"},
+			parentBug:          &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			expected:           false,
+		},
+		{
+			name:               "openshift-prefixed version matches non-prefixed configured version",
+			actualVersion:      "openshift-4.22.z",
+			configuredVersions: []string{"4.22.0"},
+			parentBug:          &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			expected:           true,
+		},
+		{
+			name:               "non-prefixed version matches openshift-prefixed configured version",
+			actualVersion:      "4.22.0",
+			configuredVersions: []string{"openshift-4.22.z"},
+			parentBug:          &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			expected:           true,
+		},
+		{
+			name:               "DFBUGS requires exact match - no prefix matching",
+			actualVersion:      "odf-v1.1.z",
+			configuredVersions: []string{"odf-v1.1.1"},
+			parentBug:          &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "DFBUGS"}}},
+			expected:           false,
+		},
+		{
+			name:               "DFBUGS exact match works",
+			actualVersion:      "odf-v1.1.1",
+			configuredVersions: []string{"odf-v1.1.1"},
+			parentBug:          &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "DFBUGS"}}},
+			expected:           true,
+		},
+		{
+			name:               "matches one of multiple configured versions",
+			actualVersion:      "4.21.z",
+			configuredVersions: []string{"4.22.0", "4.21.0"},
+			parentBug:          &jira.Issue{Fields: &jira.IssueFields{Project: jira.Project{Key: "OCPBUGS"}}},
+			expected:           true,
+		},
+		{
+			name:               "nil fields in parent bug defaults to non-DFBUGS behavior",
+			actualVersion:      "4.22.z",
+			configuredVersions: []string{"4.22.0"},
+			parentBug:          &jira.Issue{},
+			expected:           true,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := dependentTargetVersionMatch(tc.actualVersion, tc.configuredVersions, tc.parentBug)
+			if result != tc.expected {
+				t.Errorf("dependentTargetVersionMatch(%q, %v, ...) = %t, want %t", tc.actualVersion, tc.configuredVersions, result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestValidateTargetVersion(t *testing.T) {
+	var testCases = []struct {
+		name                   string
+		issue                  *jira.Issue
+		requiredTargetVersion  string
+		expectError            bool
+		expectedErrorSubstring string
+	}{
+		{
+			name: "non-DFBUGS project accepts prefix match",
+			issue: &jira.Issue{Fields: &jira.IssueFields{
+				Project:  jira.Project{Key: "OCPBUGS"},
+				Type:     jira.IssueType{Name: "Bug"},
+				Unknowns: tcontainer.MarshalMap{helpers.TargetVersionField: []*jira.Version{{Name: "4.22.0"}}},
+			}},
+			requiredTargetVersion: "4.22.0",
+			expectError:           false,
+		},
+		{
+			name: "non-DFBUGS project accepts z-stream via prefix match",
+			issue: &jira.Issue{Fields: &jira.IssueFields{
+				Project:  jira.Project{Key: "OCPBUGS"},
+				Type:     jira.IssueType{Name: "Bug"},
+				Unknowns: tcontainer.MarshalMap{helpers.TargetVersionField: []*jira.Version{{Name: "4.22.z"}}},
+			}},
+			requiredTargetVersion: "4.22.0",
+			expectError:           false,
+		},
+		{
+			name: "DFBUGS project accepts exact match",
+			issue: &jira.Issue{Fields: &jira.IssueFields{
+				Project:  jira.Project{Key: "DFBUGS"},
+				Type:     jira.IssueType{Name: "Bug"},
+				Unknowns: tcontainer.MarshalMap{helpers.TargetVersionField: []*jira.Version{{Name: "4.22.0"}}},
+			}},
+			requiredTargetVersion: "4.22.0",
+			expectError:           false,
+		},
+		{
+			name: "DFBUGS project rejects suffix variant",
+			issue: &jira.Issue{Fields: &jira.IssueFields{
+				Project:  jira.Project{Key: "DFBUGS"},
+				Type:     jira.IssueType{Name: "Bug"},
+				Unknowns: tcontainer.MarshalMap{helpers.TargetVersionField: []*jira.Version{{Name: "4.22.0.1"}}},
+			}},
+			requiredTargetVersion:  "4.22.0",
+			expectError:            true,
+			expectedErrorSubstring: `targets "4.22.0.1" instead`,
+		},
+		{
+			name: "DFBUGS project rejects openshift-prefixed variant",
+			issue: &jira.Issue{Fields: &jira.IssueFields{
+				Project:  jira.Project{Key: "DFBUGS"},
+				Type:     jira.IssueType{Name: "Bug"},
+				Unknowns: tcontainer.MarshalMap{helpers.TargetVersionField: []*jira.Version{{Name: "openshift-4.22.0"}}},
+			}},
+			requiredTargetVersion:  "4.22.0",
+			expectError:            true,
+			expectedErrorSubstring: `targets "openshift-4.22.0" instead`,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateTargetVersion(tc.issue, tc.requiredTargetVersion)
+			if tc.expectError && err == nil {
+				t.Errorf("expected error but got nil")
+			} else if !tc.expectError && err != nil {
+				t.Errorf("expected no error but got: %v", err)
+			} else if tc.expectError && err != nil && tc.expectedErrorSubstring != "" {
+				if !strings.Contains(err.Error(), tc.expectedErrorSubstring) {
+					t.Errorf("expected error to contain %q but got: %v", tc.expectedErrorSubstring, err)
+				}
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string {
+	return &s
 }
